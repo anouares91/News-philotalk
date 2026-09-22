@@ -1,0 +1,6 @@
+{
+	"appId": "com.aivideo.app",
+	"appName": "AI Video",
+	"webDir": "dist",
+	"packageClassList": []
+}

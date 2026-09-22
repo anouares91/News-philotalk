@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "A user profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "fcmTokens": { "type": "array", "items": { "type": "string" } },
+        "photoURL": { "type": "string" },
+        "plan": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid"]
+    },
+    "dialogue": {
+      "title": "Dialogue",
+      "description": "A generated philosophical dialogue.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "philosopher1": { "type": "string" },
+        "philosopher2": { "type": "string" },
+        "topic": { "type": "string" },
+        "video_url": { "type": "string" },
+        "audio_url": { "type": "string" },
+        "dialogue": { "type": "array" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "isPublic": { "type": "boolean" },
+        "likes": { "type": "number" }
+      },
+      "required": ["userId", "philosopher1", "philosopher2", "topic", "video_url"]
+    },
+    "like": {
+      "title": "Like",
+      "description": "A user's like on a dialogue.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "dialogueId": { "type": "string" }
+      },
+      "required": ["userId", "dialogueId"]
+    },
+    "video_generation": {
+      "title": "Video Generation",
+      "description": "A record of a generated philosophical debate video.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The HeyGen video ID." },
+        "philosopher1": { "type": "string", "description": "Name of the first philosopher." },
+        "philosopher2": { "type": "string", "description": "Name of the second philosopher." },
+        "topic": { "type": "string", "description": "The debate topic." },
+        "language": { "type": "string", "description": "Language code (ar/en)." },
+        "videoUrl": { "type": "string", "description": "The final video URL." },
+        "status": { "type": "string", "description": "Generation status (processing/completed/failed)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the generation was started." },
+        "userId": { "type": "string", "description": "The UID of the user who created it." }
+      },
+      "required": ["id", "philosopher1", "philosopher2", "topic", "status", "createdAt", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "User profiles."
+    },
+    "/dialogues/{dialogueId}": {
+      "schema": "dialogue",
+      "description": "Generated dialogues."
+    },
+    "/likes/{likeId}": {
+      "schema": "like",
+      "description": "User likes."
+    },
+    "/generations/{generationId}": {
+      "schema": "video_generation",
+      "description": "Collection of all generated videos."
+    }
+  }
+}

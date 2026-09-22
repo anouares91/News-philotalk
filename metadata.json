@@ -1,0 +1,8 @@
+{
+  "name": "Remix: PhiloTalk",
+  "description": "An AI-powered application that generates philosophical dialogues between avatars of famous philosophers, including voice and video generation.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
