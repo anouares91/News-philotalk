@@ -45,7 +45,6 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import { cn } from "./lib/utils";
-import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { openDB } from 'idb';
 import { useParams } from 'react-router-dom';
 import { 
@@ -447,6 +446,11 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           await setDoc(userRef, dataToSet, { merge: true });
         } catch (err) {
           console.error("Auth sync error:", err);
+          try {
+            handleFirestoreError(err, OperationType.WRITE, `users/${u.uid}`);
+          } catch (e) {
+            // Logged context
+          }
           setUser(u as UserProfile);
         }
       } else {
@@ -517,9 +521,6 @@ async function getVideoBlob(id: string): Promise<Blob | undefined> {
   const db = await initDB();
   return db.get(VIDEO_STORE_NAME, id);
 }
-
-// Initialize Gemini AI
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 // --- Types ---
 interface Philosopher {
@@ -898,27 +899,14 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
   const handleSuggestTopic = async () => {
     setIsSuggestingTopic(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: generationMode === "solo" 
-          ? `Suggest 5 interesting topics for a solo podcast monologue or voiceover.
-             ${topicSearch ? `The topics should be related to: "${topicSearch}".` : ""}
-             Return ONLY the topic names as a JSON array of strings.
-             Language: ${LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English'}`
-          : `Suggest 5 profound philosophical topics for a debate between ${p1} and ${p2}. 
-             ${topicSearch ? `The topics should be related to: "${topicSearch}".` : ""}
-             Return ONLY the topic names as a JSON array of strings. 
-             Language: ${LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English'}`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING }
-          }
-        }
+      const response = await axios.post("/api/gemini/suggest-topic", {
+        generationMode,
+        topicSearch,
+        languageName: LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English',
+        p1,
+        p2
       });
-      const result = JSON.parse(response.text.trim());
+      const result = response.data?.topics;
       if (Array.isArray(result) && result.length > 0) {
         setSuggestedTopics(result);
         // Also set the first one as default if none selected
@@ -929,7 +917,7 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
       }
     } catch (error: any) {
       console.error("Failed to suggest topic:", error);
-      const errorStr = JSON.stringify(error) + (error.message || "");
+      const errorStr = JSON.stringify(error?.response?.data || error) + (error.message || "");
       if (errorStr.includes('spending cap')) {
         toast.error("Project spending cap exceeded. Please check your Google Cloud billing.");
       } else if (errorStr.includes('429')) {
@@ -949,26 +937,12 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
     }
     setIsSearchingBookAI(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Search for a book related to: "${bookTitle || topicSearch}". 
-        Provide the most accurate Title and Author.
-        Language: ${LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English'}`,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              author: { type: Type.STRING }
-            },
-            required: ["title", "author"]
-          }
-        }
+      const response = await axios.post("/api/gemini/search-book", {
+        bookTitle,
+        topicSearch,
+        languageName: LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English'
       });
-      const result = JSON.parse(response.text.trim());
+      const result = response.data;
       if (result && result.title && result.author) {
         setBookTitle(result.title);
         setBookAuthor(result.author);
@@ -1102,38 +1076,18 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
       `;
       }
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              socialTitle: { type: Type.STRING, description: "A catchy title for social media" },
-              socialDescription: { type: Type.STRING, description: "A short description for social media with SEO and hashtags" },
-              dialogue: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    speaker: { type: Type.STRING },
-                    text: { type: Type.STRING },
-                    emotion: { type: Type.STRING, description: "One of: calm, dramatic, intense, thoughtful, confident, serious, curious, reflective, challenging, emotional" }
-                  },
-                  required: ["speaker", "text", "emotion"]
-                }
-              },
-              questionForAudience: { type: Type.STRING, description: "A final question to engage the audience" }
-            },
-            required: ["socialTitle", "socialDescription", "dialogue", "questionForAudience"]
-          }
-        }
+      const response = await axios.post("/api/gemini/generate-dialogue", {
+        generationMode,
+        p1: currentP1,
+        p1Desc,
+        p2: currentP2,
+        p2Desc,
+        finalTopic,
+        languageName: LANGUAGES.find(l => l.id === generationLanguage)?.name || 'English',
+        userQuestion
       });
 
-      const result = JSON.parse(response.text);
+      const result = response.data;
       setSocialTitle(result.socialTitle || "");
       setSocialDescription(result.socialDescription || "");
       
@@ -1159,7 +1113,7 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
       });
     } catch (error: any) {
       console.error("Generation failed:", error);
-      const errorStr = JSON.stringify(error) + (error.message || "");
+      const errorStr = JSON.stringify(error?.response?.data || error) + (error.message || "");
       if (errorStr.includes('spending cap')) {
         toast.error("Project spending cap exceeded. Please check your Google Cloud billing.", { id: toastId, duration: 5000 });
       } else if (errorStr.includes('429')) {
@@ -1185,7 +1139,6 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
     try {
       const CHUNK_SIZE = 5;
       const audioChunks: Uint8Array[] = [];
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       for (let i = 0; i < dialogue.length; i += CHUNK_SIZE) {
         const chunk = dialogue.slice(i, i + CHUNK_SIZE);
@@ -1205,35 +1158,16 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
             const voice1 = validVoices.includes(p1Voice) ? p1Voice : "Charon";
             const voice2 = validVoices.includes(p2Voice) ? p2Voice : "Kore";
 
-            const speechConfig: any = isMonologue ? {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: voice1 as any }
-              }
-            } : {
-              multiSpeakerVoiceConfig: {
-                speakerVoiceConfigs: [
-                  {
-                    speaker: p1!,
-                    voiceConfig: { prebuiltVoiceConfig: { voiceName: voice1 as any } }
-                  },
-                  {
-                    speaker: p2!,
-                    voiceConfig: { prebuiltVoiceConfig: { voiceName: voice2 as any } }
-                  }
-                ]
-              }
-            };
-
-            const ttsResponse = await ai.models.generateContent({
-              model: "gemini-2.5-flash-preview-tts",
-              contents: [{ parts: [{ text: ttsPrompt }] }],
-              config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: speechConfig
-              }
+            const ttsResponse = await axios.post("/api/gemini/generate-tts", {
+              ttsPrompt,
+              isMonologue,
+              p1: p1 || "",
+              p2: p2 || "",
+              voice1,
+              voice2
             });
 
-            base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            base64Audio = ttsResponse.data?.audioBase64;
             if (base64Audio) break;
             
             retries++;
@@ -1241,16 +1175,18 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
           } catch (err: any) {
             console.error(`TTS Chunk ${i} failed (attempt ${retries + 1}):`, err);
             console.log("Problematic prompt:", ttsPrompt);
-            const errStr = JSON.stringify(err);
+            const errStr = JSON.stringify(err?.response?.data || err);
             const is429 = 
               err.message?.includes('429') || 
               err.status === 429 || 
+              err?.response?.status === 429 ||
               errStr.includes('429') || 
               errStr.includes('RESOURCE_EXHAUSTED');
             
             const is500 =
               err.message?.includes('500') ||
               err.status === 500 ||
+              err?.response?.status === 500 ||
               errStr.includes('500') ||
               errStr.includes('INTERNAL');
 
@@ -1323,7 +1259,12 @@ export const GenerationProvider = ({ children, setCurrentVideo }: { children: Re
         likes: 0
       };
       
-      await setDoc(docRef, newVideoData);
+      try {
+        await setDoc(docRef, newVideoData);
+      } catch (docErr) {
+        console.error("Firestore dialogue save error:", docErr);
+        handleFirestoreError(docErr, OperationType.CREATE, `dialogues/${docRef.id}`);
+      }
       const newVideo = { id: docRef.id, ...newVideoData };
 
       setCurrentVideo(newVideo);
@@ -3337,6 +3278,11 @@ const VideoScreen = ({ currentVideo, history, setHistory }: { currentVideo: Vide
       toast.success(t('dialogue_published'));
     } catch (error) {
       console.error("Error publishing:", error);
+      try {
+        handleFirestoreError(error, OperationType.UPDATE, `dialogues/${video.id}`);
+      } catch (e) {
+        // Logged context
+      }
       toast.error(t('failed_to_publish'));
     } finally {
       setIsPublishing(false);
@@ -3779,7 +3725,7 @@ const VideoScreen = ({ currentVideo, history, setHistory }: { currentVideo: Vide
       {video.include_music !== false && (
         <audio 
           ref={bgMusicRef}
-          src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
+          src="/api/ambient-music"
           loop
           onError={(e) => {
             console.error("Background music failed to load");
@@ -3804,6 +3750,11 @@ const LikeButton = ({ dialogueId, likesCount, className }: { dialogueId: string;
       setIsLiked(doc.exists());
     }, (error) => {
       console.error("Likes listener error:", error);
+      try {
+        handleFirestoreError(error, OperationType.GET, `likes/${likeId}`);
+      } catch (e) {
+        // Logged context
+      }
     });
     return unsubscribe;
   }, [user, dialogueId]);
@@ -3840,6 +3791,11 @@ const LikeButton = ({ dialogueId, likesCount, className }: { dialogueId: string;
       }
     } catch (error) {
       console.error("Error toggling like:", error);
+      try {
+        handleFirestoreError(error, OperationType.WRITE, `likes/${likeId}`);
+      } catch (e) {
+        // Logged context
+      }
       toast.error("Failed to update like");
     }
   };
@@ -3875,6 +3831,11 @@ const CommunityScreen = () => {
       setLoading(false);
     }, (error) => {
       console.error("Community feed error:", error);
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'dialogues');
+      } catch (e) {
+        // Logged context
+      }
       setLoading(false);
     });
     return unsubscribe;
@@ -4152,6 +4113,11 @@ const LikedDialoguesScreen = () => {
       setLoading(false);
     }, (error) => {
       console.error("Liked dialogues listener error:", error);
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'likes');
+      } catch (e) {
+        // Logged context
+      }
       setLoading(false);
     });
 
@@ -4380,6 +4346,11 @@ const HistoryScreen = ({ history, setCurrentVideo }: { history: VideoMetadata[],
       toast.success(t('delete_success'));
     } catch (error) {
       console.error("Error deleting:", error);
+      try {
+        handleFirestoreError(error, OperationType.DELETE, `dialogues/${id}`);
+      } catch (e) {
+        // Logged context
+      }
       toast.error(t('delete_failed'));
     }
   };
@@ -4492,6 +4463,11 @@ const AppContent = () => {
     }, (error) => {
       // If index is missing, it will log an error with a link to create it
       console.error("Firestore error:", error);
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'dialogues');
+      } catch (e) {
+        // Logged context
+      }
     });
     return unsubscribe;
   }, [user]);

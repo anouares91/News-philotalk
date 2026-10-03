@@ -9,6 +9,7 @@ import Stripe from "stripe";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 
 dotenv.config();
 
@@ -28,6 +29,18 @@ if (fs.existsSync(firebaseConfigPath)) {
     });
   }
   db = getFirestore(admin.app(), firebaseConfig.firestoreDatabaseId);
+}
+
+let geminiClient: GoogleGenAI | null = null;
+export function getGeminiClient(): GoogleGenAI {
+  if (!geminiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      throw new Error("GEMINI_API_KEY environment variable is required");
+    }
+    geminiClient = new GoogleGenAI({ apiKey: key });
+  }
+  return geminiClient;
 }
 
 let stripeClient: Stripe | null = null;
@@ -98,6 +111,46 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Seamless ambient background music generator
+  app.get("/api/ambient-music", (req, res) => {
+    const sampleRate = 22050;
+    const duration = 12;
+    const numSamples = sampleRate * duration;
+    const buffer = Buffer.alloc(44 + numSamples * 2);
+
+    // RIFF header
+    buffer.write("RIFF", 0);
+    buffer.writeUInt32LE(36 + numSamples * 2, 4);
+    buffer.write("WAVE", 8);
+    buffer.write("fmt ", 12);
+    buffer.writeUInt32LE(16, 16); // subchunk1size (16 for PCM)
+    buffer.writeUInt16LE(1, 20); // audioFormat 1 (PCM)
+    buffer.writeUInt16LE(1, 22); // numChannels 1 (mono)
+    buffer.writeUInt32LE(sampleRate, 24); // sampleRate
+    buffer.writeUInt32LE(sampleRate * 2, 28); // byteRate
+    buffer.writeUInt16LE(2, 32); // blockAlign
+    buffer.writeUInt16LE(16, 34); // bitsPerSample
+    buffer.write("data", 36);
+    buffer.writeUInt32LE(numSamples * 2, 40);
+
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      // Warm, calming ambient chord: D3 (146.83 Hz), A3 (220 Hz), F#3 (185 Hz) with gentle shimmer
+      const lfo = 0.85 + 0.15 * Math.sin(2 * Math.PI * 0.25 * t);
+      const fade = Math.sin((Math.PI * i) / numSamples);
+      const s1 = Math.sin(2 * Math.PI * 146.83 * t) * 0.4;
+      const s2 = Math.sin(2 * Math.PI * 220.00 * t) * 0.3;
+      const s3 = Math.sin(2 * Math.PI * 185.00 * t) * 0.25;
+      const sampleVal = Math.max(-1, Math.min(1, (s1 + s2 + s3) * lfo * fade * 0.3));
+      const intVal = Math.floor(sampleVal * 32767);
+      buffer.writeInt16LE(intVal, 44 + i * 2);
+    }
+
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(buffer);
+  });
+
   app.get("/api/topics", (req, res) => {
     const topics = [
       { id: "reality", name: "Reality", description: "What is real? Explore the nature of reality and existence.", example: "Is the world around us merely an illusion?" },
@@ -164,10 +217,28 @@ async function startServer() {
     const p2VoiceId = isArabic ? "ar-EG-SalmaNeural" : "en-US-JennyNeural";
 
     try {
+      // Attempt to retrieve active avatar IDs from the user's HeyGen workspace
+      let p1Avatar = "f797e158-9a6d-4723-9246-441f04f2d1a2";
+      let p2Avatar = "379058b8849b4931b67484f339678170";
+
+      try {
+        const avatarsRes = await axios.get("https://api.heygen.com/v2/avatars", {
+          headers: { "X-Api-Key": process.env.HEYGEN_API_KEY },
+          timeout: 7000
+        });
+        const avatars = avatarsRes.data?.data?.avatars;
+        if (Array.isArray(avatars) && avatars.length >= 2) {
+          p1Avatar = avatars[0].avatar_id;
+          p2Avatar = avatars[1].avatar_id;
+        } else if (Array.isArray(avatars) && avatars.length === 1) {
+          p1Avatar = avatars[0].avatar_id;
+          p2Avatar = avatars[0].avatar_id;
+        }
+      } catch (err: any) {
+        console.warn("Could not query HeyGen avatars dynamically, using defaults:", err.message);
+      }
+
       // Map dialogue to Heygen video inputs
-      // Heygen v2 generate takes an array of video_inputs. 
-      // Each video_input is a scene.
-      // Limit to 10 scenes to avoid hitting limits during testing
       const scenes = dialogue.slice(0, 10);
       
       const video_inputs = scenes.map((exchange: any) => {
@@ -175,7 +246,7 @@ async function startServer() {
         return {
           character: {
             type: "avatar",
-            avatar_id: isP1 ? "f797e158-9a6d-4723-9246-441f04f2d1a2" : "379058b8849b4931b67484f339678170",
+            avatar_id: isP1 ? p1Avatar : p2Avatar,
             avatar_style: "normal"
           },
           voice: {
@@ -244,6 +315,245 @@ async function startServer() {
         error: "Failed to get video status",
         details: error.response?.data || error.message
       });
+    }
+  });
+
+  // --- Gemini API Endpoints ---
+  app.post("/api/gemini/suggest-topic", async (req, res) => {
+    try {
+      const { generationMode, topicSearch, languageName, p1, p2 } = req.body;
+      const ai = getGeminiClient();
+      const prompt = generationMode === "solo" 
+        ? `Suggest 5 interesting topics for a solo podcast monologue or voiceover.
+           ${topicSearch ? `The topics should be related to: "${topicSearch}".` : ""}
+           Return ONLY the topic names as a JSON array of strings.
+           Language: ${languageName || "English"}`
+        : `Suggest 5 profound philosophical topics for a debate between ${p1 || "Philosopher 1"} and ${p2 || "Philosopher 2"}. 
+           ${topicSearch ? `The topics should be related to: "${topicSearch}".` : ""}
+           Return ONLY the topic names as a JSON array of strings. 
+           Language: ${languageName || "English"}`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.6-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING }
+          }
+        }
+      });
+      const result = JSON.parse(response.text?.trim() || "[]");
+      res.json({ topics: result });
+    } catch (error: any) {
+      console.error("Gemini suggest-topic error:", error);
+      res.status(500).json({ error: error.message || "Failed to suggest topics" });
+    }
+  });
+
+  app.post("/api/gemini/search-book", async (req, res) => {
+    try {
+      const { bookTitle, topicSearch, languageName } = req.body;
+      const ai = getGeminiClient();
+      const prompt = `Search for a book related to: "${bookTitle || topicSearch}". Provide the most accurate Title and Author. Language: ${languageName || "English"}`;
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-3.6-flash",
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              author: { type: Type.STRING }
+            },
+            required: ["title", "author"]
+          }
+        }
+      });
+      const result = JSON.parse(response.text?.trim() || "{}");
+      res.json(result);
+    } catch (error: any) {
+      console.error("Gemini search-book error:", error);
+      res.status(500).json({ error: error.message || "Failed to search book" });
+    }
+  });
+
+  app.post("/api/gemini/generate-dialogue", async (req, res) => {
+    try {
+      const { generationMode, p1, p1Desc, p2, p2Desc, finalTopic, languageName, userQuestion } = req.body;
+      const ai = getGeminiClient();
+
+      let prompt = "";
+      if (generationMode === "solo") {
+        prompt = `
+          You are an expert AI voiceover script generator.
+          Your task is to create a compelling, high-quality monologue script for a single narrator.
+          The script should be engaging, informative, and viral-friendly.
+          
+          Core Rule:
+          The script MUST start with a strong attention-grabbing hook in the first sentence.
+          Do NOT start with greetings or introductions.
+          
+          Emotion System:
+          Each line must include an emotion tag to guide voice tone.
+          Use emotions like: (calm), (dramatic), (intense), (thoughtful), (confident), (serious), (curious), (reflective), (challenging), (emotional).
+          
+          General Rules:
+          - No greetings
+          - No introductions
+          - Strong hook at start
+          - Natural human narration
+          - Short sentences
+          - Small pauses (…) for realism
+          - Maximum duration 30–40 seconds
+          - End with a thought-provoking closing statement or question
+          
+          Topic: ${finalTopic}
+          Language: ${languageName || "English"}
+          ${userQuestion ? `Specific Direction: "${userQuestion}"` : ""}
+        `;
+      } else {
+        prompt = `
+          You are an expert AI philosophical podcast script generator for a modern short video application.
+          Your task is to create short, engaging, and viral philosophical dialogue between two philosophers in a modern podcast studio.
+ 
+          Core Rule:
+          The script MUST start with a strong attention-grabbing hook in the first sentence.
+          Do NOT start with greetings or introductions.
+          The first line must immediately capture attention with a bold philosophical idea, provocative question, unexpected insight, or debatable claim.
+ 
+          Emotion System:
+          Each line must include an emotion tag to guide AI avatar movement and voice tone.
+          Use emotions like: (calm), (dramatic), (intense), (thoughtful), (confident), (serious), (curious), (reflective), (challenging), (emotional).
+ 
+          Philosopher Speaking Styles:
+          * Socrates: calm, curious, asks deep questions
+          * Plato: rational and structured
+          * Aristotle: logical and practical
+          * Nietzsche: bold and intense
+          * Dostoevsky: emotional and psychological
+          * Ibn Sina: intellectual and calm
+          * Descartes: logical and analytical
+          * Kant: structured and moral
+          * Confucius: wise and peaceful
+          * Any other philosopher: adapt to their authentic style
+ 
+          General Rules:
+          - No greetings
+          - No introductions
+          - Strong hook at start
+          - Simple modern language
+          - Natural human conversation
+          - Short sentences
+          - Fast-paced dialogue
+          - Small pauses (…) for realism
+          - Philosophers must disagree
+          - Maximum duration 30–40 seconds
+          - End with audience question
+ 
+          Structure:
+          Hook -> Reaction -> Debate -> Different perspectives -> Tension -> Ending question
+ 
+          Tone:
+          Modern, Podcast style, Engaging, Viral-friendly, Philosophical but simple.
+ 
+          Inputs:
+          Philosopher 1: ${p1} ${p1Desc ? `(${p1Desc})` : ""}
+          Philosopher 2: ${p2} ${p2Desc ? `(${p2Desc})` : ""}
+          Topic: ${finalTopic}
+          Language: ${languageName || "English"}
+          ${userQuestion ? `Specific Question/Direction from the user: "${userQuestion}"` : ""}
+        `;
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.6-flash",
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              socialTitle: { type: Type.STRING, description: "A catchy title for social media" },
+              socialDescription: { type: Type.STRING, description: "A short description for social media with SEO and hashtags" },
+              dialogue: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    speaker: { type: Type.STRING },
+                    text: { type: Type.STRING },
+                    emotion: { type: Type.STRING, description: "One of: calm, dramatic, intense, thoughtful, confident, serious, curious, reflective, challenging, emotional" }
+                  },
+                  required: ["speaker", "text", "emotion"]
+                }
+              },
+              questionForAudience: { type: Type.STRING, description: "A final question to engage the audience" }
+            },
+            required: ["socialTitle", "socialDescription", "dialogue", "questionForAudience"]
+          }
+        }
+      });
+
+      const result = JSON.parse(response.text?.trim() || "{}");
+      res.json(result);
+    } catch (error: any) {
+      console.error("Gemini generate-dialogue error:", error);
+      res.status(500).json({ error: error.message || "Failed to generate dialogue" });
+    }
+  });
+
+  app.post("/api/gemini/generate-tts", async (req, res) => {
+    try {
+      const { ttsPrompt, isMonologue, p1, p2, voice1, voice2 } = req.body;
+      const ai = getGeminiClient();
+
+      const validVoices = ["Charon", "Kore", "Puck", "Zephyr", "Fenrir"];
+      const v1 = validVoices.includes(voice1) ? voice1 : "Charon";
+      const v2 = validVoices.includes(voice2) ? voice2 : "Kore";
+
+      const speechConfig: any = isMonologue ? {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: v1 }
+        }
+      } : {
+        multiSpeakerVoiceConfig: {
+          speakerVoiceConfigs: [
+            {
+              speaker: p1 || "Philosopher 1",
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: v1 } }
+            },
+            {
+              speaker: p2 || "Philosopher 2",
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: v2 } }
+            }
+          ]
+        }
+      };
+
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: ttsPrompt }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: speechConfig
+        }
+      });
+
+      const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!base64Audio) {
+        return res.status(500).json({ error: "No audio generated by TTS model" });
+      }
+
+      res.json({ audioBase64: base64Audio });
+    } catch (error: any) {
+      console.error("Gemini generate-tts error:", error);
+      res.status(500).json({ error: error.message || "Failed to generate audio" });
     }
   });
 

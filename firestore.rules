@@ -1,42 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Document ID: {userId} (Firebase Auth UID)
-    // Fields:
-    //   - uid: string (required) - The UID of the user.
-    //   - displayName: string (optional) - The user's display name.
-    //   - email: string (optional) - The user's email address.
-    //   - photoURL: string (optional) - The user's photo URL.
-    //   - plan: string (optional) - The user's subscription plan.
-    //   - createdAt: timestamp (optional) - When the user was created.
-    //   - updatedAt: timestamp (optional) - When the user was last updated.
-    //
-    // Collection: dialogues
-    // Document ID: {dialogueId}
-    // Fields:
-    //   - userId: string (required) - The UID of the user who created it.
-    //   - philosopher1: string (required) - Name of the first philosopher.
-    //   - philosopher2: string (required) - Name of the second philosopher.
-    //   - topic: string (required) - The debate topic.
-    //   - video_url: string (required) - The final video URL.
-    //   - audio_url: string (optional) - The final audio URL.
-    //   - dialogue: list (optional) - The dialogue exchanges.
-    //   - created_at: string (optional) - ISO date string.
-    //   - isPublic: bool (optional) - Whether it's public.
-    //   - likes: number (optional) - Number of likes.
-    //
-    // Collection: generations
-    // Document ID: {generationId} (HeyGen video ID)
-    // ... (already defined)
-    //
-    // ===============================================================
 
-    // Helper Functions
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -45,69 +10,57 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    function isValidDialogue(data) {
-      return data.userId == request.auth.uid &&
-             data.philosopher1 is string &&
-             (!('philosopher2' in data) || data.philosopher2 == null || data.philosopher2 is string) &&
-             data.topic is string;
+    // Connectivity test endpoint
+    match /test/{docId} {
+      allow read: if true;
     }
 
-    function isValidGeneration(data) {
-      return data.keys().hasAll(['id', 'philosopher1', 'topic', 'status', 'createdAt', 'userId']) &&
-             data.id is string &&
-             data.philosopher1 is string &&
-             (!('philosopher2' in data) || data.philosopher2 == null || data.philosopher2 is string) &&
-             data.topic is string &&
-             data.status is string &&
-             data.createdAt is string &&
-             data.userId == request.auth.uid;
-    }
-
+    // User profiles: users can read and write only their own document
     match /users/{userId} {
       allow read: if isOwner(userId);
-      allow create: if isOwner(userId) && request.resource.data.uid == userId;
-      allow update: if isOwner(userId) && (!('uid' in request.resource.data) || request.resource.data.uid == userId);
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
+      allow delete: if isOwner(userId);
     }
 
+    // Dialogues
     match /dialogues/{dialogueId} {
-      // Public dialogues can be read by anyone
-      allow get: if resource == null || resource.data.isPublic == true || isOwner(resource.data.userId);
-      allow list: if resource.data.isPublic == true || isOwner(resource.data.userId);
+      // Allow single document get if public or owned
+      allow get: if resource.data.isPublic == true || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      
+      // Allow list queries if public or filtered by user's own uid
+      allow list: if resource.data.isPublic == true || (isAuthenticated() && resource.data.userId == request.auth.uid);
       
       // Users can create their own dialogues
-      allow create: if isAuthenticated() && isValidDialogue(request.resource.data);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
       
-      // Users can update their own dialogues (e.g., likes, isPublic)
-      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes'])));
+      // Users can update their own dialogues, or anyone authenticated can update likes
+      allow update: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes'])
+      );
       
       // Users can delete their own dialogues
-      allow delete: if isOwner(resource.data.userId);
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
 
+    // Likes
     match /likes/{likeId} {
-      allow get: if isAuthenticated() && likeId.matches(request.auth.uid + '_.*');
+      allow get: if isAuthenticated() && (resource.data.userId == request.auth.uid || likeId.matches(request.auth.uid + '_.*'));
       allow list: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && likeId == request.auth.uid + '_' + request.resource.data.dialogueId;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
       allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
 
+    // Generations
     match /generations/{generationId} {
-      // Users can only read their own generations
       allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      
-      // Users can create their own generations
-      allow create: if isAuthenticated() && isValidGeneration(request.resource.data);
-      
-      // Users can update their own generations (e.g., status, videoUrl)
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && 
-                    request.resource.data.userId == resource.data.userId &&
-                    request.resource.data.id == resource.data.id;
-                    
-      // Users can delete their own generations
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
       allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
-    
-    // Default deny
+
+    // Default deny catch-all
     match /{document=**} {
       allow read, write: if false;
     }
